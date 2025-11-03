@@ -1,4 +1,4 @@
-import streamlit as st
+import gradio as gr
 import requests
 import time
 import calendar
@@ -12,10 +12,8 @@ from selenium.webdriver.support import expected_conditions as EC
 
 GREYTHR_URL = "https://eazydiner.greythr.com"
 
+# ------------------- Selenium Setup -------------------
 def setup_driver():
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -23,194 +21,102 @@ def setup_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
 
-    # Point to Streamlit Cloud Chrome paths
+    # Hugging Face Spaces Chrome paths (Docker runtime)
     chrome_options.binary_location = "/usr/bin/google-chrome"
     service = Service("/usr/bin/chromedriver")
 
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 
+# ------------------- Login + Cookie Extraction -------------------
 def login_with_selenium(emp_id, password):
-    """Login using Selenium and return cookies"""
     driver = None
     try:
         driver = setup_driver()
         if not driver:
             raise Exception("Could not initialize browser")
-        
+
         wait = WebDriverWait(driver, 25)
-        
-        # Navigate to login page
         driver.get(f"{GREYTHR_URL}/uas/portal/auth/login")
-        
-        # Wait for page to load completely
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
-        
-        # Find and fill form fields
-        username_field = driver.find_element(By.CSS_SELECTOR, "input[name='username']")
-        username_field.clear()
-        username_field.send_keys(emp_id)
-        
-        password_field = driver.find_element(By.CSS_SELECTOR, "input[name='password']")
-        password_field.clear()
-        password_field.send_keys(password)
-        
-        login_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        driver.execute_script("arguments[0].click();", login_button)
-        
-        # Wait for login to complete
-        st.write("⏳ Waiting for login to complete...")
+
+        driver.find_element(By.CSS_SELECTOR, "input[name='username']").send_keys(emp_id)
+        driver.find_element(By.CSS_SELECTOR, "input[name='password']").send_keys(password)
+        driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
         time.sleep(5)
-        
-        # Check if login was successful
+
         current_url = driver.current_url.lower()
-        if any(keyword in current_url for keyword in ["dashboard", "home", "latte", "v3/portal"]):
-            pass  # Login successful
-        else:
-            # Wait more and check again
-            time.sleep(3)
-            current_url = driver.current_url.lower()
-            if "login" in current_url or "auth" in current_url:
-                raise Exception("Login failed - still on login page")
-        
-        # Get ALL cookies including session cookies
+        if "login" in current_url:
+            raise Exception("Login failed - still on login page")
+
         cookies = driver.get_cookies()
-        cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
-        
-        # Verify cookies work by making a test request
-        test_session = requests.Session()
-        for name, value in cookie_dict.items():
-            test_session.cookies.set(name, value)
-        
-        test_response = test_session.post(
+        cookie_dict = {c["name"]: c["value"] for c in cookies}
+
+        # Validate cookies
+        s = requests.Session()
+        for n, v in cookie_dict.items():
+            s.cookies.set(n, v)
+        test = s.post(
             f"{GREYTHR_URL}/v3/login-status",
-            headers={
-                "accept": "application/json",
-                "content-type": "application/json", 
-                "x-requested-with": "XMLHttpRequest",
-                "referer": f"{GREYTHR_URL}/v3/portal",
-            },
+            headers={"accept": "application/json", "content-type": "application/json"},
             json={},
-            timeout=30
+            timeout=30,
         )
-        
-        if test_response.status_code != 200:
-            raise Exception("Cookies verification failed")
-        
+        if test.status_code != 200:
+            raise Exception("Login failed (cookie invalid)")
+
         return cookie_dict
-        
-    except Exception as e:
-        raise e
-        
     finally:
         if driver:
             driver.quit()
 
+
+# ------------------- Helpers -------------------
 def get_employee_id(cookies):
-    """Get employee ID using cookies"""
-    session = requests.Session()
-    
-    # Set all cookies
-    for name, value in cookies.items():
-        session.cookies.set(name, value)
-    
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json", 
-        "x-requested-with": "XMLHttpRequest",
-        "referer": f"{GREYTHR_URL}/v3/portal",
-    }
-    
-    try:
-        response = session.post(f"{GREYTHR_URL}/v3/login-status", headers=headers, json={}, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            emp_id = data.get("user", {}).get("employeeId")
-            if emp_id:
-                return emp_id
-    except:
-        pass
-    
+    s = requests.Session()
+    for n, v in cookies.items():
+        s.cookies.set(n, v)
+    r = s.post(f"{GREYTHR_URL}/v3/login-status", json={}, timeout=30)
+    if r.status_code == 200:
+        return r.json().get("user", {}).get("employeeId")
     return None
 
+
 def get_attendance(cookies, emp_id, date_str):
-    """Get attendance data for specific date"""
-    session = requests.Session()
-    
-    # Set all cookies
-    for name, value in cookies.items():
-        session.cookies.set(name, value)
-    
-    headers = {
-        'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': f'{GREYTHR_URL}/v3/portal',
-    }
-    
-    try:
-        url = f"{GREYTHR_URL}/latte/v3/attendance/info/table/{emp_id}/total?startDate={date_str}&endDate={date_str}"
-        res = session.get(url, headers=headers, timeout=30)
-        
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, dict):
-                data = data.get("data", data)
-                total_hrs = data.get("totalWorkHrs", 0)
-                return parse_work_hours(total_hrs)
-    except:
-        pass
-    
+    s = requests.Session()
+    for n, v in cookies.items():
+        s.cookies.set(n, v)
+    url = f"{GREYTHR_URL}/latte/v3/attendance/info/table/{emp_id}/total?startDate={date_str}&endDate={date_str}"
+    r = s.get(url, timeout=30)
+    if r.status_code == 200:
+        data = r.json().get("data", {})
+        total = data.get("totalWorkHrs", 0)
+        return parse_work_hours(total)
     return 0
 
-def check_session_valid(cookies):
-    """Check if the session is still valid"""
-    session = requests.Session()
-    for name, value in cookies.items():
-        session.cookies.set(name, value)
-    
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json", 
-        "x-requested-with": "XMLHttpRequest",
-        "referer": f"{GREYTHR_URL}/v3/portal",
-    }
-    
-    try:
-        response = session.post(f"{GREYTHR_URL}/v3/login-status", headers=headers, json={}, timeout=30)
-        return response.status_code == 200
-    except:
-        return False
 
-def parse_work_hours(value):
-    if value is None:
+def parse_work_hours(v):
+    if not v:
         return 0
-    if isinstance(value, (int, float)):
-        return int(value * 60) if value < 24 else int(value)
-    if isinstance(value, str):
-        value = value.strip()
-        if ":" in value:
-            h, m = value.split(":")
+    if isinstance(v, str):
+        if ":" in v:
+            h, m = v.split(":")
             return int(h) * 60 + int(m)
         try:
-            hours = float(value)
-            return int(hours * 60)
-        except ValueError:
+            return int(float(v) * 60)
+        except:
             return 0
+    if isinstance(v, (int, float)):
+        return int(v * 60) if v < 24 else int(v)
     return 0
+
 
 def mins_to_hours(m):
     h = m // 60
     mins = m % 60
     return f"{h:02d}:{mins:02d}"
 
-def time_to_minutes(time_str):
-    try:
-        hours, minutes = map(int, time_str.split(':'))
-        return hours * 60 + minutes
-    except:
-        return 0
 
 def get_all_dates(year, month):
     today = date.today()
@@ -221,158 +127,82 @@ def get_all_dates(year, month):
         if date(year, month, d).weekday() != 6 and date(year, month, d) <= today
     ]
 
-def main():
-    st.set_page_config(page_title="GreyHR Attendance", page_icon="📅", layout="centered")
-    st.title("🚀 GreyHR Attendance Tracker")
-    
-    # Initialize session state
-    if 'cookies' not in st.session_state:
-        st.session_state.cookies = None
-    if 'employee_id' not in st.session_state:
-        st.session_state.employee_id = None
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-    
-    # Login section
-    st.write("### 🔑 Login")
-    
-    with st.form("login_form"):
-        emp_id = st.text_input("Employee ID", value="ED0683", placeholder="ED0683")
-        password = st.text_input("Password", type="password")
-        login_submitted = st.form_submit_button("Login")
-    
-    if login_submitted:
-        if not emp_id or not password:
-            st.error("Please enter credentials")
-            return
-            
-        with st.spinner("Logging in..."):
-            try:
-                cookies = login_with_selenium(emp_id, password)
-                employee_id = get_employee_id(cookies)
-                
-                if employee_id:
-                    # Store in session state
-                    st.session_state.cookies = cookies
-                    st.session_state.employee_id = employee_id
-                    st.session_state.logged_in = True
-                    st.success(f"✅ Login successful! Employee ID: {employee_id}")
-                else:
-                    st.error("❌ Login failed - could not get employee ID")
-                    
-            except Exception as e:
-                st.error(f"❌ Login failed: {str(e)}")
-    
-    # Check if user is logged in
-    if not st.session_state.logged_in or not st.session_state.cookies:
-        st.warning("Please login first")
-        return
-    
-    # Verify session is still valid
-    if not check_session_valid(st.session_state.cookies):
-        st.error("Session expired. Please login again.")
-        st.session_state.logged_in = False
-        st.session_state.cookies = None
-        st.session_state.employee_id = None
-        return
-    
-    # Attendance section - only show if logged in
-    st.write("### 📊 Attendance Data")
-    st.success(f"Logged in as Employee ID: {st.session_state.employee_id}")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        year = st.selectbox("Select Year", list(range(2023, date.today().year + 1)), 
-                          index=len(range(2023, date.today().year + 1)) - 1)
-    with col2:
-        month = st.selectbox("Select Month", list(range(1, 13)), index=date.today().month - 1)
-    
-    if st.button("Get Attendance Data"):
-        with st.spinner(f"Fetching attendance for {calendar.month_name[month]} {year}..."):
-            # Double-check session before proceeding
-            if not check_session_valid(st.session_state.cookies):
-                st.error("Session expired during request. Please login again.")
-                st.session_state.logged_in = False
-                st.session_state.cookies = None
-                st.session_state.employee_id = None
-                return
-            
-            all_dates = get_all_dates(year, month)
-            
-            if not all_dates:
-                st.warning("No dates to process for the selected month.")
-                return
-                
-            weekday_times, saturday_times, absent_days = [], [], []
-            REQUIRED_WEEKDAY = 9 * 60
-            REQUIRED_SATURDAY = 8 * 60
-            
-            progress_bar = st.progress(0)
-            
-            for i, d in enumerate(all_dates):
-                date_str = d.strftime("%Y-%m-%d")
-                
-                # Check session periodically
-                if i % 5 == 0 and not check_session_valid(st.session_state.cookies):
-                    st.error("Session expired during data fetch. Please login again.")
-                    st.session_state.logged_in = False
-                    st.session_state.cookies = None
-                    st.session_state.employee_id = None
-                    return
-                
-                total_work = get_attendance(st.session_state.cookies, st.session_state.employee_id, date_str)
-                is_saturday = d.weekday() == 5
-                
-                if total_work > 0:
-                    hrs = total_work // 60
-                    mins = total_work % 60
-                    time_str = f"{hrs:02d}:{mins:02d}"
-                    (saturday_times if is_saturday else weekday_times).append(time_str)
-                else:
-                    absent_days.append(date_str)
-                
-                progress_bar.progress((i + 1) / len(all_dates))
-                time.sleep(0.2)
-            
-            # Calculate results
-            weekday_minutes = sum(time_to_minutes(t) for t in weekday_times)
-            saturday_minutes = sum(time_to_minutes(t) for t in saturday_times)
-            total_worked = weekday_minutes + saturday_minutes
-            required_total = len(weekday_times) * REQUIRED_WEEKDAY + len(saturday_times) * REQUIRED_SATURDAY
-            difference = total_worked - required_total
-            
-            # Display results
-            st.subheader("📊 Attendance Summary")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Weekdays Worked", len(weekday_times), mins_to_hours(weekday_minutes))
-                st.metric("Saturdays Worked", len(saturday_times), mins_to_hours(saturday_minutes))
-            with col2:
-                st.metric("Total Worked", mins_to_hours(total_worked))
-                st.metric("Required Total", mins_to_hours(required_total))
-            
-            if difference > 0:
-                st.success(f"✅ Surplus: {mins_to_hours(difference)} ({difference} minutes)")
-            elif difference < 0:
-                st.warning(f"⚠️ Deficit: {mins_to_hours(-difference)} ({-difference} minutes)")
-            else:
-                st.info("🎯 Perfect attendance — exact hours met!")
-            
-            if absent_days:
-                st.write("### 📆 Absent Days")
-                st.write(", ".join(absent_days))
-            else:
-                st.success("🎉 No absences this month!")
-    
-    # Logout button
-    st.write("---")
-    if st.button("Logout"):
-        st.session_state.cookies = None
-        st.session_state.employee_id = None
-        st.session_state.logged_in = False
-        st.success("Logged out successfully!")
-        st.experimental_rerun()
 
-if __name__ == "__main__":
-    main()
+def time_to_minutes(t):
+    try:
+        h, m = map(int, t.split(":"))
+        return h * 60 + m
+    except:
+        return 0
+
+
+# ------------------- Main Logic (Gradio Function) -------------------
+def attendance_action(emp_id, password, year, month):
+    try:
+        cookies = login_with_selenium(emp_id, password)
+        emp_id_server = get_employee_id(cookies)
+        if not emp_id_server:
+            return "❌ Login failed - Employee ID not found."
+
+        all_dates = get_all_dates(year, month)
+        if not all_dates:
+            return "No data for this month."
+
+        weekday_times, saturday_times, absent = [], [], []
+        REQUIRED_WEEKDAY = 9 * 60
+        REQUIRED_SATURDAY = 8 * 60
+
+        for d in all_dates:
+            total = get_attendance(cookies, emp_id_server, d.strftime("%Y-%m-%d"))
+            if total > 0:
+                time_str = mins_to_hours(total)
+                (saturday_times if d.weekday() == 5 else weekday_times).append(time_str)
+            else:
+                absent.append(d.strftime("%Y-%m-%d"))
+
+        weekday_minutes = sum(time_to_minutes(t) for t in weekday_times)
+        saturday_minutes = sum(time_to_minutes(t) for t in saturday_times)
+        total_worked = weekday_minutes + saturday_minutes
+        required_total = len(weekday_times) * REQUIRED_WEEKDAY + len(saturday_times) * REQUIRED_SATURDAY
+        diff = total_worked - required_total
+
+        report = f"👤 Employee ID: {emp_id_server}\n📅 Month: {calendar.month_name[month]} {year}\n\n"
+        report += f"Weekdays Worked: {len(weekday_times)} ({mins_to_hours(weekday_minutes)})\n"
+        report += f"Saturdays Worked: {len(saturday_times)} ({mins_to_hours(saturday_minutes)})\n"
+        report += f"Total Worked: {mins_to_hours(total_worked)}\n"
+        report += f"Required: {mins_to_hours(required_total)}\n"
+
+        if diff > 0:
+            report += f"✅ Surplus: {mins_to_hours(diff)} ({diff} mins)\n"
+        elif diff < 0:
+            report += f"⚠️ Deficit: {mins_to_hours(-diff)} ({-diff} mins)\n"
+        else:
+            report += "🎯 Perfect attendance — exact hours met!\n"
+
+        if absent:
+            report += f"\n❌ Absent Days:\n" + ", ".join(absent)
+        else:
+            report += "\n🎉 No absences this month!"
+
+        return report
+
+    except Exception as e:
+        return f"⚠️ Error: {str(e)}"
+
+
+# ------------------- Gradio UI -------------------
+years = list(range(2023, date.today().year + 1))
+months = list(range(1, 13))
+
+with gr.Blocks(title="GreyHR Attendance Tracker") as app:
+    gr.Markdown("## 🚀 GreyHR Attendance Tracker")
+    emp_id = gr.Textbox(label="Employee ID", placeholder="ED0683")
+    password = gr.Textbox(label="Password", type="password")
+    year = gr.Dropdown(choices=years, value=date.today().year, label="Year")
+    month = gr.Dropdown(choices=months, value=date.today().month, label="Month")
+    output = gr.Textbox(label="Result", lines=20)
+
+    btn = gr.Button("Fetch Attendance")
+    btn.click(fn=attendance_action, inputs=[emp_id, password, year, month], outputs=output)
+
+app.launch()
